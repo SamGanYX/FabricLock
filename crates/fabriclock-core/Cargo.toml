@@ -1,0 +1,11 @@
+[package]
+name = "fabriclock-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+fabriclock-ipc = { path = "../fabriclock-ipc" }
+fabriclock-hw = { path = "../fabriclock-hw" }
+fabriclock-tomography = { path = "../fabriclock-tomography" }
+serde = { workspace = true }

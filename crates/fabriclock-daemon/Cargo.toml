@@ -1,0 +1,15 @@
+[package]
+name = "fabriclock-daemon"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+fabriclock-ipc = { path = "../fabriclock-ipc" }
+fabriclock-hw = { path = "../fabriclock-hw" }
+fabriclock-tomography = { path = "../fabriclock-tomography" }
+fabriclock-core = { path = "../fabriclock-core" }
+fabriclock-remediate = { path = "../fabriclock-remediate" }
+fabriclock-verbs-hook = { path = "../fabriclock-verbs-hook" }
+serde = { workspace = true }
+serde_json = { workspace = true }

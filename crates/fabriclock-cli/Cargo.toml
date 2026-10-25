@@ -1,0 +1,21 @@
+[package]
+name = "fabriclock-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "fabriclock"
+path = "src/main.rs"
+
+[dependencies]
+fabriclock-ipc = { path = "../fabriclock-ipc" }
+fabriclock-hw = { path = "../fabriclock-hw" }
+fabriclock-nccl-plugin = { path = "../fabriclock-nccl-plugin" }
+fabriclock-tomography = { path = "../fabriclock-tomography" }
+fabriclock-core = { path = "../fabriclock-core" }
+fabriclock-remediate = { path = "../fabriclock-remediate" }
+fabriclock-verbs-hook = { path = "../fabriclock-verbs-hook" }
+fabriclock-daemon = { path = "../fabriclock-daemon" }
+serde = { workspace = true }
+serde_json = { workspace = true }

@@ -1,0 +1,15 @@
+[package]
+name = "fabriclock-verbs-hook"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "fabriclock_verbs_hook"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+fabriclock-ipc = { path = "../fabriclock-ipc" }
+fabriclock-remediate = { path = "../fabriclock-remediate" }
+libc = { workspace = true }
+serde = { workspace = true }

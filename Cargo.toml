@@ -1,0 +1,24 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/fabriclock-ipc",
+    "crates/fabriclock-hw",
+    "crates/fabriclock-nccl-plugin",
+    "crates/fabriclock-tomography",
+    "crates/fabriclock-core",
+    "crates/fabriclock-remediate",
+    "crates/fabriclock-verbs-hook",
+    "crates/fabriclock-daemon",
+    "crates/fabriclock-cli",
+]
+
+[workspace.package]
+version = "0.2.0"
+edition = "2021"
+license = "Apache-2.0"
+authors = ["FabricLock Contributors"]
+
+[workspace.dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+libc = "0.2"

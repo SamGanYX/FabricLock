@@ -1,0 +1,12 @@
+[package]
+name = "fabriclock-remediate"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+fabriclock-ipc = { path = "../fabriclock-ipc" }
+fabriclock-core = { path = "../fabriclock-core" }
+fabriclock-tomography = { path = "../fabriclock-tomography" }
+serde = { workspace = true }
+libc = { workspace = true }

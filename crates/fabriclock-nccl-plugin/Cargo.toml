@@ -1,0 +1,13 @@
+[package]
+name = "fabriclock-nccl-plugin"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "fabriclock_nccl_profiler"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+fabriclock-ipc = { path = "../fabriclock-ipc" }
+libc = { workspace = true }

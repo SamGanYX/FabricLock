@@ -1,0 +1,62 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: fabriclock-agent
+  namespace: kube-system
+  labels:
+    app.kubernetes.io/name: fabriclock
+    app.kubernetes.io/component: optical-telemetry-agent
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: fabriclock
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: fabriclock
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9402"
+        prometheus.io/path: "/metrics"
+    spec:
+      hostNetwork: true
+      hostIPC: true
+      priorityClassName: system-node-critical
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: fabriclock-agent
+          image: ghcr.io/fabriclock/fabriclock:v0.2.0
+          args: ["audit"]
+          ports:
+            - name: metrics
+              containerPort: 9402
+              protocol: TCP
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "32Mi"
+            limits:
+              cpu: "1000m"
+              memory: "64Mi"
+          securityContext:
+            privileged: false
+            capabilities:
+              add: ["NET_ADMIN", "IPC_LOCK"]
+          volumeMounts:
+            - name: sysfs-infiniband
+              mountPath: /sys/class/infiniband
+              readOnly: true
+            - name: dev-shm
+              mountPath: /dev/shm
+      volumes:
+        - name: sysfs-infiniband
+          hostPath:
+            path: /sys/class/infiniband
+            type: Directory
+        - name: dev-shm
+          hostPath:
+            path: /dev/shm
+            type: Directory

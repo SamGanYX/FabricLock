@@ -1,0 +1,345 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>FabricLock — Dual-Tier Optical Telemetry & Hitless Collective Control Plane</title>
+  <style>
+    :root {
+      --bg: #070b14;
+      --card: #0f172a;
+      --border: #1e293b;
+      --text: #f8fafc;
+      --muted: #94a3b8;
+      --cyan: #38bdf8;
+      --emerald: #34d399;
+      --red: #ef4444;
+      --amber: #fbbf24;
+      --purple: #a855f7;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      padding: 24px;
+      line-height: 1.5;
+    }
+    header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding-bottom: 20px;
+      border-bottom: 1px solid var(--border);
+      margin-bottom: 24px;
+    }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    .badge {
+      background: rgba(56, 189, 248, 0.15);
+      color: var(--cyan);
+      border: 1px solid rgba(56, 189, 248, 0.4);
+      padding: 4px 10px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 600;
+      letter-spacing: 0.5px;
+    }
+    .controls {
+      display: flex;
+      gap: 12px;
+    }
+    button {
+      padding: 10px 18px;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      font-weight: 600;
+      cursor: pointer;
+      font-size: 14px;
+      transition: all 0.2s;
+    }
+    .btn-danger {
+      background: rgba(239, 68, 68, 0.15);
+      color: var(--red);
+      border-color: var(--red);
+    }
+    .btn-danger:hover { background: rgba(239, 68, 68, 0.3); }
+    .btn-success {
+      background: rgba(52, 211, 153, 0.18);
+      color: var(--emerald);
+      border-color: var(--emerald);
+    }
+    .btn-success:hover { background: rgba(52, 211, 153, 0.32); }
+    .kpi-grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 16px;
+      margin-bottom: 24px;
+    }
+    .kpi-card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 18px;
+    }
+    .kpi-label { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.7px; }
+    .kpi-value { font-size: 32px; font-weight: 700; margin: 6px 0; font-family: 'Cascadia Code', monospace; }
+    .kpi-sub { font-size: 13px; color: var(--muted); }
+    .main-grid {
+      display: grid;
+      grid-template-columns: 1.25fr 1fr;
+      gap: 20px;
+    }
+    .panel {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 20px;
+    }
+    .panel h2 {
+      font-size: 16px;
+      margin-bottom: 14px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .fault-box {
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 16px;
+      margin-bottom: 14px;
+      background: rgba(15, 23, 42, 0.7);
+      transition: all 0.3s;
+    }
+    .fault-box.degraded {
+      border-color: var(--red);
+      background: rgba(239, 68, 68, 0.07);
+    }
+    .fault-box.bypassed {
+      border-color: var(--emerald);
+      background: rgba(52, 211, 153, 0.07);
+    }
+    .fault-title {
+      font-weight: 700;
+      font-size: 15px;
+      display: flex;
+      justify-content: space-between;
+      margin-bottom: 8px;
+    }
+    .kv-row {
+      display: flex;
+      justify-content: space-between;
+      font-size: 13px;
+      padding: 4px 0;
+      border-bottom: 1px dashed rgba(148, 163, 184, 0.12);
+    }
+    .kv-row span:first-child { color: var(--muted); }
+    .mono { font-family: 'Cascadia Code', monospace; }
+    .topology-svg {
+      width: 100%;
+      height: 360px;
+      background: #090e1a;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="brand">
+      <h1>FabricLock</h1>
+      <span class="badge">v0.2.0 DUAL-TIER CLOS CONTROL PLANE</span>
+      <span class="badge" style="color: var(--emerald); border-color: var(--emerald);">0% SWITCH I2C RISK</span>
+    </div>
+    <div class="controls">
+      <button class="btn-danger" onclick="setMode('degraded')">1. Inject Tier-1 & Tier-2 Gray Failures</button>
+      <button class="btn-success" onclick="setMode('bypassed')">2. Execute Hitless Dual-Tier Bypass (&lt;200ms)</button>
+    </div>
+  </header>
+
+  <section class="kpi-grid">
+    <div class="kpi-card">
+      <div class="kpi-label">Cluster Model FLOPs Utilization (MFU)</div>
+      <div class="kpi-value" id="kpi-mfu" style="color: var(--red);">30.7%</div>
+      <div class="kpi-sub" id="kpi-mfu-sub">Stalled by 2 PAM4 Optical Gray Failures (-23.1% MFU)</div>
+    </div>
+    <div class="kpi-card">
+      <div class="kpi-label">NCCL AllReduce Step Time</div>
+      <div class="kpi-value" id="kpi-step" style="color: var(--amber);">318.5 ms</div>
+      <div class="kpi-sub" id="kpi-step-sub">Ideal Baseline: 182.0 ms (+136.5 ms PFC stall)</div>
+    </div>
+    <div class="kpi-card">
+      <div class="kpi-label">Active Gray-Failure Optics</div>
+      <div class="kpi-value" id="kpi-faults" style="color: var(--red);">2 / 12,288</div>
+      <div class="kpi-sub" id="kpi-faults-sub">1 Host-to-Leaf (Tier 1) + 1 Leaf-to-Spine (Tier 2)</div>
+    </div>
+    <div class="kpi-card">
+      <div class="kpi-label">Monthly Compute Burn Reclaimed</div>
+      <div class="kpi-value" id="kpi-savings" style="color: var(--emerald);">$3,181,267</div>
+      <div class="kpi-sub">4,096x H100 GPUs @ $2.65/GPU-hr</div>
+    </div>
+  </section>
+
+  <section class="main-grid">
+    <div class="panel">
+      <h2>
+        <span>Live Clos Fabric Topology (Host PCIe BAR0 + ECMP UDP Tomography)</span>
+        <span class="badge" id="status-pill">GRAY FAILURE STALL ACTIVE</span>
+      </h2>
+      <svg class="topology-svg" viewBox="0 0 700 340">
+        <!-- Spine Switches -->
+        <rect x="90" y="20" width="140" height="44" rx="6" fill="#1e293b" stroke="#38bdf8" stroke-width="1.5"/>
+        <text x="160" y="47" fill="#f8fafc" font-size="13" text-anchor="middle" font-weight="bold">Spine-06 (800G)</text>
+
+        <rect id="spine7-box" x="280" y="20" width="160" height="44" rx="6" fill="#2a1215" stroke="#ef4444" stroke-width="2"/>
+        <text x="360" y="42" fill="#f8fafc" font-size="13" text-anchor="middle" font-weight="bold">Spine-07:Port22</text>
+        <text id="spine7-sub" x="360" y="57" fill="#ef4444" font-size="10" text-anchor="middle">Tier-2 Gray Failure (BER 2.9e-4)</text>
+
+        <rect x="490" y="20" width="140" height="44" rx="6" fill="#1e293b" stroke="#34d399" stroke-width="1.5"/>
+        <text x="560" y="47" fill="#f8fafc" font-size="13" text-anchor="middle" font-weight="bold">Spine-08 (800G)</text>
+
+        <!-- Leaf Switches -->
+        <rect x="140" y="135" width="160" height="42" rx="6" fill="#1e293b" stroke="#64748b" stroke-width="1.5"/>
+        <text x="220" y="160" fill="#f8fafc" font-size="13" text-anchor="middle">Leaf-Rail0-SW03</text>
+
+        <rect x="410" y="135" width="160" height="42" rx="6" fill="#1e293b" stroke="#64748b" stroke-width="1.5"/>
+        <text x="490" y="160" fill="#f8fafc" font-size="13" text-anchor="middle">Leaf-Rail1-SW03</text>
+
+        <!-- Tier 2 Links -->
+        <line x1="220" y1="135" x2="160" y2="64" stroke="#38bdf8" stroke-width="2" />
+        <line id="tier2-bad-link" x1="490" y1="135" x2="360" y2="64" stroke="#ef4444" stroke-width="3.5" stroke-dasharray="6,4" />
+        <line id="tier2-good-link" x1="490" y1="135" x2="560" y2="64" stroke="#475569" stroke-width="2" />
+
+        <!-- Host GPUs & NICs -->
+        <rect x="90" y="255" width="520" height="68" rx="8" fill="#0f172a" stroke="#38bdf8" stroke-width="1.5"/>
+        <text x="350" y="276" fill="#38bdf8" font-size="12" text-anchor="middle" font-weight="bold">
+          gpu-node-042 (HGX H100 8-GPU Server — 900 GB/s Intra-Node NVSwitch)
+        </text>
+        <text id="pxn-status" x="350" y="305" fill="#94a3b8" font-size="12" text-anchor="middle">
+          GPU0 → mlx5_0 (Degraded Optic SN: INNO-800G-DR8-99481A) | GPU1 → mlx5_1 (Healthy)
+        </text>
+
+        <!-- Tier 1 Links -->
+        <line id="tier1-bad-link" x1="220" y1="255" x2="220" y2="177" stroke="#ef4444" stroke-width="3.5" stroke-dasharray="6,4" />
+        <line id="tier1-good-link" x1="490" y1="255" x2="490" y2="177" stroke="#34d399" stroke-width="3" />
+        <!-- PXN Cross-Rail Arc -->
+        <path id="pxn-arc" d="M 220 255 Q 355 215 490 255" fill="none" stroke="#34d399" stroke-width="0" />
+      </svg>
+    </div>
+
+    <div class="panel">
+      <h2>Dual-Tier Detection &amp; Autonomous Remediation Log</h2>
+
+      <div id="fault1-card" class="fault-box degraded">
+        <div class="fault-title">
+          <span>Tier-1 Fault: Host-to-Leaf Transceiver</span>
+          <span class="mono" style="color: var(--amber);">SN: INNO-800G-DR8-99481A</span>
+        </div>
+        <div class="kv-row"><span>Location</span><span class="mono">gpu-node-042 :: mlx5_0 (Rail 0)</span></div>
+        <div class="kv-row"><span>Detection (0% Switch I2C)</span><span class="mono">Host PCIe BAR0 PPCNT @ 1,000 Hz</span></div>
+        <div class="kv-row"><span>Pre-FEC BER / Slope</span><span class="mono" style="color: var(--red);">3.80e-4 (+4.72/s² spike)</span></div>
+        <div class="kv-row"><span>Bypass Mechanism</span><span class="mono" id="f1-action">Pending NVSwitch PXN Rail-Shift...</span></div>
+      </div>
+
+      <div id="fault2-card" class="fault-box degraded">
+        <div class="fault-title">
+          <span>Tier-2 Fault: Leaf-to-Spine Transceiver</span>
+          <span class="mono" style="color: var(--amber);">SN: COHR-800G-2FR4-77109C</span>
+        </div>
+        <div class="kv-row"><span>Location</span><span class="mono">spine-sw-07 :: Port 22 (Clos Uplink)</span></div>
+        <div class="kv-row"><span>Detection (0% Switch I2C)</span><span class="mono">Bipartite QP + ECMP UDP Sport Tomography</span></div>
+        <div class="kv-row"><span>Pre-FEC BER / Retrans</span><span class="mono" style="color: var(--red);">2.90e-4 (47 RoCE Retrans/step)</span></div>
+        <div class="kv-row"><span>Bypass Mechanism</span><span class="mono" id="f2-action">Pending QP UDP SrcPort Hash Rotation...</span></div>
+      </div>
+    </div>
+  </section>
+
+  <script>
+    function setMode(mode) {
+      const mfu = document.getElementById('kpi-mfu');
+      const mfuSub = document.getElementById('kpi-mfu-sub');
+      const step = document.getElementById('kpi-step');
+      const stepSub = document.getElementById('kpi-step-sub');
+      const faults = document.getElementById('kpi-faults');
+      const faultsSub = document.getElementById('kpi-faults-sub');
+      const pill = document.getElementById('status-pill');
+
+      const f1Card = document.getElementById('fault1-card');
+      const f2Card = document.getElementById('fault2-card');
+      const f1Action = document.getElementById('f1-action');
+      const f2Action = document.getElementById('f2-action');
+
+      const t1Bad = document.getElementById('tier1-bad-link');
+      const t2Bad = document.getElementById('tier2-bad-link');
+      const t2Good = document.getElementById('tier2-good-link');
+      const pxnArc = document.getElementById('pxn-arc');
+      const pxnStatus = document.getElementById('pxn-status');
+
+      if (mode === 'bypassed') {
+        mfu.textContent = '52.6%';
+        mfu.style.color = 'var(--emerald)';
+        mfuSub.textContent = '+21.9% MFU Recovered in 185ms (Zero Checkpoint Rollback)';
+
+        step.textContent = '186.2 ms';
+        step.style.color = 'var(--emerald)';
+        stepSub.textContent = 'Restored from 318.5 ms (-132.3 ms stall eliminated)';
+
+        faults.textContent = '0 Active';
+        faults.style.color = 'var(--emerald)';
+        faultsSub.textContent = '2 Quarantined & Bypassed (Ready for Tech Cable Swap)';
+
+        pill.textContent = 'AUTONOMOUS BYPASS ACTIVE (52.6% MFU)';
+        pill.style.color = 'var(--emerald)';
+
+        f1Card.className = 'fault-box bypassed';
+        f2Card.className = 'fault-box bypassed';
+        f1Action.textContent = 'BYPASSED (185ms): GPU0 -> NVSwitch (900GB/s) -> mlx5_1';
+        f1Action.style.color = 'var(--emerald)';
+        f2Action.textContent = 'BYPASSED (3.4ms): QP UDP SrcPort 49164 -> 49181 (Spine-08)';
+        f2Action.style.color = 'var(--emerald)';
+
+        t1Bad.setAttribute('stroke', '#334155');
+        t2Bad.setAttribute('stroke', '#334155');
+        t2Good.setAttribute('stroke', '#34d399');
+        t2Good.setAttribute('stroke-width', '4');
+        pxnArc.setAttribute('stroke-width', '3.5');
+        pxnStatus.textContent = 'ACTIVE PXN FAILOVER: GPU0 Traffic Routed via 900GB/s NVSwitch -> Egress mlx5_1';
+        pxnStatus.setAttribute('fill', '#34d399');
+      } else {
+        mfu.textContent = '30.7%';
+        mfu.style.color = 'var(--red)';
+        mfuSub.textContent = 'Stalled by 2 PAM4 Optical Gray Failures (-23.1% MFU)';
+
+        step.textContent = '318.5 ms';
+        step.style.color = 'var(--amber)';
+        stepSub.textContent = 'Ideal Baseline: 182.0 ms (+136.5 ms PFC stall)';
+
+        faults.textContent = '2 / 12,288';
+        faults.style.color = 'var(--red)';
+        faultsSub.textContent = '1 Host-to-Leaf (Tier 1) + 1 Leaf-to-Spine (Tier 2)';
+
+        pill.textContent = 'GRAY FAILURE STALL ACTIVE';
+        pill.style.color = 'var(--cyan)';
+
+        f1Card.className = 'fault-box degraded';
+        f2Card.className = 'fault-box degraded';
+        f1Action.textContent = 'Pending NVSwitch PXN Rail-Shift...';
+        f1Action.style.color = 'var(--text)';
+        f2Action.textContent = 'Pending QP UDP SrcPort Hash Rotation...';
+        f2Action.style.color = 'var(--text)';
+
+        t1Bad.setAttribute('stroke', '#ef4444');
+        t2Bad.setAttribute('stroke', '#ef4444');
+        t2Good.setAttribute('stroke', '#475569');
+        t2Good.setAttribute('stroke-width', '2');
+        pxnArc.setAttribute('stroke-width', '0');
+        pxnStatus.textContent = 'GPU0 → mlx5_0 (Degraded Optic SN: INNO-800G-DR8-99481A) | GPU1 → mlx5_1 (Healthy)';
+        pxnStatus.setAttribute('fill', '#94a3b8');
+      }
+    }
+  </script>
+</body>
+</html>
