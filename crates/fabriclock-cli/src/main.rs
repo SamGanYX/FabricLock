@@ -159,6 +159,10 @@ fn run_full_hardware_and_cluster_audit(sysfs_root: &Path) {
     snap0.rx_fec_corr_symbols = 4_800;
     let _ = tracker.ingest(snap0.clone(), 800.0);
 
+    snap0.timestamp_ns = 1_025_000_000;
+    snap0.rx_fec_corr_symbols = 9_600;
+    let _ = tracker.ingest(snap0.clone(), 800.0);
+
     // Inject PAM4 gray failure burst at t = 1.03s
     snap0.timestamp_ns = 1_030_000_000;
     snap0.rx_fec_corr_symbols = 1_240_000;

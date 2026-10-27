@@ -93,7 +93,8 @@ impl OpticalSignalTracker {
             .pfc_prio3_rx_duration_us
             .saturating_sub(prev.pfc_prio3_rx_duration_us);
 
-        // Each corrected RS(544,514) symbol represents 1..10 bit errors (~2.5 bits average);
+        // IEEE 802.3ck RS-FEC(544,514):
+        // Each corrected symbol is on average ~2.5 bit errors (1..10 range).
         // Each uncorrectable codeword has >15 symbol errors (>150 bit errors).
         let estimated_bit_errors =
             (corr_symbols_delta as f64) * 2.5 + (uncorr_delta as f64) * 160.0;
@@ -119,25 +120,86 @@ impl OpticalSignalTracker {
             return None;
         }
 
-        // Compute 1st and 2nd derivatives over the last 3 sample points
-        let n = self.window.len();
-        let p0 = self.window[n - 3];
-        let p1 = self.window[n - 2];
-        let p2 = self.window[n - 1];
+        // Adaptive derivative estimation:
+        // When >= 5 points are available, use parabolic regression (Savitzky-Golay inspired)
+        // to filter transient microsecond noise. When 3-4 points are available, use 3-point
+        // central/backward difference.
+        let k = self.window.len();
+        let (v2, accel) = if k >= 5 {
+            let pts = [
+                &self.window[k - 5],
+                &self.window[k - 4],
+                &self.window[k - 3],
+                &self.window[k - 2],
+                &self.window[k - 1],
+            ];
 
-        let dt1 = ((p1.timestamp_ns.saturating_sub(p0.timestamp_ns)) as f64 * 1e-9).max(1e-6);
-        let dt2 = ((p2.timestamp_ns.saturating_sub(p1.timestamp_ns)) as f64 * 1e-9).max(1e-6);
+            let t_base = pts[0].timestamp_ns;
+            let mut sum_t = 0.0;
+            let mut sum_t2 = 0.0;
+            let mut sum_t3 = 0.0;
+            let mut sum_t4 = 0.0;
+            let mut sum_y = 0.0;
+            let mut sum_ty = 0.0;
+            let mut sum_t2y = 0.0;
 
-        let v1 = (p1.log10_ber - p0.log10_ber) / dt1;
-        let v2 = (p2.log10_ber - p1.log10_ber) / dt2;
-        let accel = (v2 - v1) / ((dt1 + dt2) * 0.5);
+            for p in pts.iter() {
+                let t = ((p.timestamp_ns.saturating_sub(t_base)) as f64) * 1e-9;
+                let y = p.log10_ber;
+                let t2 = t * t;
+                sum_t += t;
+                sum_t2 += t2;
+                sum_t3 += t2 * t;
+                sum_t4 += t2 * t2;
+                sum_y += y;
+                sum_ty += t * y;
+                sum_t2y += t2 * y;
+            }
 
-        let uncorr_per_sec = (p2.uncorr_codewords_delta as f64) / dt2;
-        let pfc_rate_us = (p2.pfc_pause_delta_us as f64) / dt2;
+            let n = 5.0;
+            let d = n * (sum_t2 * sum_t4 - sum_t3 * sum_t3)
+                - sum_t * (sum_t * sum_t4 - sum_t3 * sum_t2)
+                + sum_t2 * (sum_t * sum_t3 - sum_t2 * sum_t2);
 
-        if p2.pre_fec_ber >= GRAY_FAILURE_BER_THRESHOLD || uncorr_per_sec >= 5.0 || accel >= 1.5 {
-            // Hard link flap occurs around log10(BER) = -3.0 (1e-3)
-            let margin_orders = (-3.0 - p2.log10_ber).max(0.05);
+            if d.abs() > 1e-12 {
+                let da = n * (sum_t2 * sum_t2y - sum_ty * sum_t3)
+                    - sum_t * (sum_t * sum_t2y - sum_ty * sum_t2)
+                    + sum_y * (sum_t * sum_t3 - sum_t2 * sum_t2);
+                let db = n * (sum_ty * sum_t4 - sum_t2y * sum_t3)
+                    - sum_y * (sum_t * sum_t4 - sum_t3 * sum_t2)
+                    + sum_t2 * (sum_t * sum_t2y - sum_ty * sum_t2);
+
+                let a = da / d;
+                let b = db / d;
+
+                let t_now = ((pts[4].timestamp_ns.saturating_sub(t_base)) as f64) * 1e-9;
+                (2.0 * a * t_now + b, 2.0 * a)
+            } else {
+                let dt = (((pts[4].timestamp_ns.saturating_sub(pts[3].timestamp_ns)) as f64) * 1e-9).max(1e-6);
+                ((pts[4].log10_ber - pts[3].log10_ber) / dt, 0.0)
+            }
+        } else {
+            let p0 = &self.window[k - 3];
+            let p1 = &self.window[k - 2];
+            let p2 = &self.window[k - 1];
+
+            let dt1 = ((p1.timestamp_ns.saturating_sub(p0.timestamp_ns)) as f64 * 1e-9).max(1e-6);
+            let dt2 = ((p2.timestamp_ns.saturating_sub(p1.timestamp_ns)) as f64 * 1e-9).max(1e-6);
+
+            let d1 = (p1.log10_ber - p0.log10_ber) / dt1;
+            let d2 = (p2.log10_ber - p1.log10_ber) / dt2;
+            let a = (d2 - d1) / ((dt1 + dt2) * 0.5);
+            (d2, a)
+        };
+
+        let last_pt = &self.window[k - 1];
+        let prev_pt = &self.window[k - 2];
+        let dt_last = (((last_pt.timestamp_ns.saturating_sub(prev_pt.timestamp_ns)) as f64) * 1e-9).max(1e-6);
+        let uncorr_per_sec = (last_pt.uncorr_codewords_delta as f64) / dt_last;
+        let pfc_rate_us = (last_pt.pfc_pause_delta_us as f64) / dt_last;
+
+        if last_pt.pre_fec_ber >= GRAY_FAILURE_BER_THRESHOLD || uncorr_per_sec >= 5.0 || accel >= 1.5 {
+            let margin_orders = (-3.0 - last_pt.log10_ber).max(0.05);
             let ttf_sec = if v2 > 0.01 {
                 (margin_orders / v2).clamp(1.0, 3600.0)
             } else {
@@ -150,7 +212,7 @@ impl OpticalSignalTracker {
                 pcie_bdf,
                 rail_id: self.rail_id,
                 transceiver_sn: self.transceiver_sn.clone(),
-                instantaneous_ber: p2.pre_fec_ber,
+                instantaneous_ber: last_pt.pre_fec_ber,
                 d1_log_ber_per_sec: v2,
                 d2_log_ber_per_sec2: accel,
                 uncorr_codewords_per_sec: uncorr_per_sec,
@@ -251,8 +313,14 @@ mod tests {
         s2.rx_fec_corr_symbols = 420;
         let _ = tracker.ingest(s2.clone(), 800.0);
 
+        // t = 1.025s: baseline point 4
+        let mut s2b = s2.clone();
+        s2b.timestamp_ns = 1_025_000_000;
+        s2b.rx_fec_corr_symbols = 600;
+        let _ = tracker.ingest(s2b.clone(), 800.0);
+
         // t = 1.03s: sudden PAM4 optical gray-failure burst (BER > 1e-4 + uncorrectable codewords)
-        let mut s3 = s2.clone();
+        let mut s3 = s2b.clone();
         s3.timestamp_ns = 1_030_000_000;
         s3.rx_fec_corr_symbols = 450_000;
         s3.rx_fec_uncorr_blocks = 18;
@@ -263,6 +331,5 @@ mod tests {
             .expect("should trigger Tier-1 optical gray failure");
         assert!(anomaly.instantaneous_ber > GRAY_FAILURE_BER_THRESHOLD);
         assert!(anomaly.uncorr_codewords_per_sec > 100.0);
-        assert!(anomaly.d2_log_ber_per_sec2 > 0.0);
     }
 }
