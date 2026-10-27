@@ -112,6 +112,31 @@ pub fn execute_udp_sport_probe(
     let sock = UdpSocket::bind(bind_addr)?;
     sock.set_read_timeout(Some(timeout))?;
 
+    // On Linux, configure DSCP / Traffic Class (TOS) to match RoCEv2 Priority (DSCP 26 / 0x68 = CS3/AF31)
+    #[cfg(target_os = "linux")]
+    unsafe {
+        use std::os::unix::io::AsRawFd;
+        let fd = sock.as_raw_fd();
+        let tos = pkt.dscp_tos as libc::c_int;
+        if bind_addr.is_ipv4() {
+            libc::setsockopt(
+                fd,
+                libc::IPPROTO_IP,
+                libc::IP_TOS,
+                &tos as *const _ as *const libc::c_void,
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            );
+        } else {
+            libc::setsockopt(
+                fd,
+                libc::IPPROTO_IPV6,
+                libc::IPV6_TCLASS,
+                &tos as *const _ as *const libc::c_void,
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            );
+        }
+    }
+
     let wire = pkt.to_bytes();
     let t0 = Instant::now();
     sock.send_to(&wire, target)?;
