@@ -86,25 +86,31 @@ impl Default for TransceiverModuleInfo {
 
 /// Fast, stack-allocated integer parser for Linux sysfs counter files.
 /// Avoids heap allocations (`String::new()`) inside the 1,000 Hz telemetry loop.
+/// Also supports hex notation (e.g. `0x104a`) common in RoCEv2 sysfs attributes.
 #[inline]
 pub fn read_sysfs_u64(path: &Path) -> Option<u64> {
     let mut file = fs::File::open(path).ok()?;
-    let mut buf = [0u8; 32];
+    let mut buf = [0u8; 48];
     let n = file.read(&mut buf).ok()?;
     if n == 0 {
         return None;
     }
-    let mut val: u64 = 0;
-    let mut found_digit = false;
-    for &b in &buf[..n] {
-        if b.is_ascii_digit() {
-            val = val.wrapping_mul(10).wrapping_add((b - b'0') as u64);
-            found_digit = true;
-        } else if found_digit {
-            break;
+    let s = std::str::from_utf8(&buf[..n]).ok()?.trim();
+    if let Some(stripped) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        u64::from_str_radix(stripped, 16).ok()
+    } else {
+        let mut val: u64 = 0;
+        let mut found_digit = false;
+        for &b in s.as_bytes() {
+            if b.is_ascii_digit() {
+                val = val.wrapping_mul(10).wrapping_add((b - b'0') as u64);
+                found_digit = true;
+            } else if found_digit {
+                break;
+            }
         }
+        if found_digit { Some(val) } else { None }
     }
-    if found_digit { Some(val) } else { None }
 }
 
 /// Discovers all InfiniBand / RoCEv2 HCAs under `/sys/class/infiniband` (or a custom root for testing).
