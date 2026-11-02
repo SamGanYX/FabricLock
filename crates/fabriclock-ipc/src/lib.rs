@@ -159,12 +159,14 @@ impl ShmIpcRegion {
     pub fn pop_event(&self) -> Option<NcclTelemetryEvent> {
         let r = self.read_idx.load(Ordering::Relaxed);
         let w = self.write_idx.load(Ordering::Acquire);
-        if r >= w {
+        let diff = w.wrapping_sub(r);
+        // If writer hasn't advanced past reader (or counter wrapped beyond 2^63 distance), no new items
+        if diff == 0 || diff > (1u64 << 63) {
             return None;
         }
-        // If producer lapped consumer, jump forward to keep up with real-time tail
-        let effective_r = if w.saturating_sub(r) > (RING_CAPACITY as u64) {
-            w - (RING_CAPACITY as u64)
+        // If producer lapped consumer, jump forward to keep up with the real-time tail of the ring
+        let effective_r = if diff > (RING_CAPACITY as u64) {
+            w.wrapping_sub(RING_CAPACITY as u64)
         } else {
             r
         };
@@ -280,5 +282,40 @@ mod tests {
         boxed_region.set_rail_pxn_failover(0, 1);
         assert_eq!(boxed_region.directive.quarantined_rail_mask.load(Ordering::Acquire), 1);
         assert_eq!(boxed_region.directive.pxn_sibling_map[0].load(Ordering::Acquire), 1);
+    }
+
+    #[test]
+    fn test_ring_buffer_wrapping_indices() {
+        let mut boxed_region: Box<ShmIpcRegion> = unsafe {
+            let layout = std::alloc::Layout::new::<ShmIpcRegion>();
+            let ptr = std::alloc::alloc_zeroed(layout) as *mut ShmIpcRegion;
+            Box::from_raw(ptr)
+        };
+        boxed_region.init_in_place();
+
+        // Simulate write and read index at the boundary of u64 overflow
+        let near_max = u64::MAX - 2;
+        boxed_region.write_idx.store(near_max, Ordering::Release);
+        boxed_region.read_idx.store(near_max, Ordering::Release);
+
+        let mut ev = NcclTelemetryEvent::default();
+        ev.step_seq = 1001;
+        boxed_region.push_event(ev); // write_idx -> u64::MAX - 1
+        ev.step_seq = 1002;
+        boxed_region.push_event(ev); // write_idx -> u64::MAX
+        ev.step_seq = 1003;
+        boxed_region.push_event(ev); // write_idx -> 0 (wrapped!)
+        ev.step_seq = 1004;
+        boxed_region.push_event(ev); // write_idx -> 1
+
+        let e1 = boxed_region.pop_event().expect("pop 1001");
+        assert_eq!(e1.step_seq, 1001);
+        let e2 = boxed_region.pop_event().expect("pop 1002");
+        assert_eq!(e2.step_seq, 1002);
+        let e3 = boxed_region.pop_event().expect("pop 1003");
+        assert_eq!(e3.step_seq, 1003);
+        let e4 = boxed_region.pop_event().expect("pop 1004");
+        assert_eq!(e4.step_seq, 1004);
+        assert!(boxed_region.pop_event().is_none());
     }
 }
