@@ -122,11 +122,23 @@ pub fn discover_linux_hcas(sysfs_root: &Path) -> Vec<(String, u8, PathBuf)> {
             .filter_map(|e| e.ok())
             .filter_map(|e| e.file_name().into_string().ok())
             .collect();
-        names.sort();
+        // Sort numerically by trailing integer (e.g. mlx5_2 before mlx5_10)
+        names.sort_by_key(|name| {
+            let num = name
+                .rsplit('_')
+                .next()
+                .and_then(|s| s.parse::<u32>().ok())
+                .unwrap_or(u32::MAX);
+            (num, name.clone())
+        });
         for (idx, hca) in names.into_iter().enumerate() {
             let port_dir = ib_class.join(&hca).join("ports/1");
             if port_dir.exists() {
-                devices.push((hca, idx as u8, port_dir));
+                let rail_id = hca
+                    .strip_prefix("mlx5_")
+                    .and_then(|s| s.parse::<u8>().ok())
+                    .unwrap_or(idx as u8);
+                devices.push((hca, rail_id, port_dir));
             }
         }
     }
@@ -161,11 +173,23 @@ pub fn poll_linux_hca_port(
         .and_then(|p| p.file_name().map(|f| f.to_string_lossy().into_owned()))
         .unwrap_or_else(|| format!("0000:{:02x}:00.0", 0x10 + rail_id));
 
+    // Resolve real netdev interface name from device/net/ directory if present
+    let netdev_dir = sysfs_root
+        .join("sys/class/infiniband")
+        .join(hca_name)
+        .join("device/net");
+    let netdev_name = fs::read_dir(&netdev_dir)
+        .ok()
+        .and_then(|mut entries| {
+            entries.find_map(|e| e.ok().map(|d| d.file_name().to_string_lossy().into_owned()))
+        })
+        .unwrap_or_else(|| format!("eth{}", rail_id));
+
     NicHardwareSnapshot {
         timestamp_ns,
         node_hostname: node_hostname.to_string(),
         hca_name: hca_name.to_string(),
-        netdev_name: format!("eth{}", rail_id),
+        netdev_name,
         pcie_bdf,
         rail_id,
         port_num: 1,
@@ -423,6 +447,32 @@ mod tests {
         assert_eq!(snap.roce_adp_retrans, 312);
         assert_eq!(snap.pfc_prio3_rx_duration_us, 18450);
         assert_eq!(snap.port_rcv_data_qwords, 99999999);
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_discover_linux_hcas_numerical_sorting() {
+        let tmp = std::env::temp_dir().join("fabriclock_discover_test");
+        let ib_base = tmp.join("sys/class/infiniband");
+        let _ = fs::create_dir_all(&ib_base);
+
+        // Create mlx5_0, mlx5_1, mlx5_10, mlx5_2
+        for hca in ["mlx5_10", "mlx5_0", "mlx5_2", "mlx5_1"] {
+            let port_dir = ib_base.join(hca).join("ports/1");
+            let _ = fs::create_dir_all(&port_dir);
+        }
+
+        let discovered = discover_linux_hcas(&tmp);
+        assert_eq!(discovered.len(), 4);
+        assert_eq!(discovered[0].0, "mlx5_0");
+        assert_eq!(discovered[0].1, 0);
+        assert_eq!(discovered[1].0, "mlx5_1");
+        assert_eq!(discovered[1].1, 1);
+        assert_eq!(discovered[2].0, "mlx5_2");
+        assert_eq!(discovered[2].1, 2);
+        assert_eq!(discovered[3].0, "mlx5_10");
+        assert_eq!(discovered[3].1, 10);
 
         let _ = fs::remove_dir_all(&tmp);
     }
