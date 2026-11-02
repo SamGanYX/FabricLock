@@ -14,7 +14,6 @@
 use fabriclock_ipc::{NcclCollectiveKind, NcclTelemetryEvent, ShmIpcRegion};
 use libc::{c_char, c_int, c_void, size_t};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 // --- NVIDIA NCCL Profiler v2 Constants (`nccl/profiler_v2.h`) ---
 pub const NCCL_SUCCESS: c_int = 0;
@@ -97,10 +96,20 @@ pub struct ProfilerContext {
 
 #[inline]
 fn monotonic_ns() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0)
+    #[cfg(target_os = "linux")]
+    unsafe {
+        let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+        if libc::clock_gettime(libc::CLOCK_MONOTONIC_RAW, &mut ts) == 0
+            || libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) == 0
+        {
+            return (ts.tv_sec as u64) * 1_000_000_000 + (ts.tv_nsec as u64);
+        }
+    }
+    use std::sync::OnceLock;
+    use std::time::Instant;
+    static BASE: OnceLock<Instant> = OnceLock::new();
+    let base = BASE.get_or_init(Instant::now);
+    Instant::now().duration_since(*base).as_nanos() as u64
 }
 
 pub unsafe extern "C" fn fabriclock_profiler_init(
