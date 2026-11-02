@@ -8,7 +8,7 @@
 //!      distinguish a Tier-1 Host-to-Leaf fault from a Tier-2 Leaf-to-Spine uplink fault.
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::{SocketAddr, UdpSocket};
 use std::time::{Duration, Instant};
 
@@ -191,8 +191,14 @@ pub fn solve_bipartite_spine_tomography(
 
     let mut diagnoses = Vec::new();
     for ((rail_id, leaf_id, bad_sport), bad_obs) in bucket_stats {
-        // Require at least 2 independent host pairs intersecting on the same Leaf-to-Spine bucket
-        if bad_obs.len() < 2 {
+        // Require at least 2 distinct host pairs intersecting on the same Leaf-to-Spine bucket
+        // to prevent local host-level noise from falsely implicating an upstream optical link.
+        let distinct_pairs: HashSet<(&str, &str)> = bad_obs
+            .iter()
+            .map(|o| (o.src_node.as_str(), o.dst_node.as_str()))
+            .collect();
+
+        if distinct_pairs.len() < 2 {
             continue;
         }
 
@@ -213,14 +219,14 @@ pub fn solve_bipartite_spine_tomography(
         let total_retrans: u64 = bad_obs.iter().map(|o| o.roce_retrans_delta).sum();
         let drop_rate = (total_retrans as f64) / (bad_obs.len() as f64);
 
-        let confidence = (0.85 + 0.04 * (bad_obs.len() as f64)).min(0.998);
+        let confidence = (0.85 + 0.04 * (distinct_pairs.len() as f64)).min(0.998);
 
         diagnoses.push(SpineLinkFaultDiagnosis {
             rail_id,
             leaf_switch_id: leaf_id,
             spine_ecmp_bucket: bad_sport,
             recommended_replacement_sport: replacement_sport,
-            intersecting_host_pairs: bad_obs.len(),
+            intersecting_host_pairs: distinct_pairs.len(),
             mean_elevated_rtt_us: mean_rtt_us,
             drop_and_retrans_rate: drop_rate,
             confidence_score: confidence,
@@ -234,6 +240,40 @@ pub fn solve_bipartite_spine_tomography(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_bipartite_solver_rejects_single_host_pair_duplicates() {
+        // Single host pair sending duplicate probes with anomalies should NOT diagnose a Spine fault
+        let obs = vec![
+            EcmpFlowObservation {
+                src_node: "gpu-node-001".into(),
+                src_tor_leaf: "tor-leaf-r1-sw01".into(),
+                dst_node: "gpu-node-002".into(),
+                dst_tor_leaf: "tor-leaf-r1-sw02".into(),
+                rail_id: 1,
+                udp_sport: 49152,
+                rtt_ns: 350_000,
+                packet_dropped: true,
+                ecn_ce_marked: false,
+                roce_retrans_delta: 5,
+            },
+            EcmpFlowObservation {
+                src_node: "gpu-node-001".into(),
+                src_tor_leaf: "tor-leaf-r1-sw01".into(),
+                dst_node: "gpu-node-002".into(),
+                dst_tor_leaf: "tor-leaf-r1-sw02".into(),
+                rail_id: 1,
+                udp_sport: 49152,
+                rtt_ns: 320_000,
+                packet_dropped: false,
+                ecn_ce_marked: true,
+                roce_retrans_delta: 2,
+            },
+        ];
+
+        let diagnoses = solve_bipartite_spine_tomography(&obs, 12_000);
+        assert!(diagnoses.is_empty(), "Should reject single host-pair false alarms");
+    }
 
     #[test]
     fn test_wire_probe_serialization_and_bipartite_solver() {
