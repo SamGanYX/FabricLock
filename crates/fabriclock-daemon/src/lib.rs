@@ -163,20 +163,29 @@ pub fn evaluate_preflight_certification(state: &ClusterControlPlaneState) -> Pre
     let mut env_overrides = Vec::new();
     let mut cordoned_nodes = Vec::new();
 
-    if state.active_pxn_failovers.len() >= 2
-        && state.active_pxn_failovers[0].node_hostname == state.active_pxn_failovers[1].node_hostname
-    {
-        let bad_node = state.active_pxn_failovers[0].node_hostname.clone();
-        cordoned_nodes.push(bad_node.clone());
+    // Group failovers by node to detect any node suffering from >= 2 degrading rails
+    let mut node_failover_counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for f in &state.active_pxn_failovers {
+        *node_failover_counts.entry(&f.node_hostname).or_default() += 1;
+    }
+
+    for (node, count) in &node_failover_counts {
+        if *count >= 2 {
+            cordoned_nodes.push((*node).to_string());
+        }
+    }
+    cordoned_nodes.sort();
+
+    if !cordoned_nodes.is_empty() {
         return PreFlightVerdict {
             allow_job_start: false,
             auto_remediated: false,
             recommended_nccl_env: env_overrides,
-            cordoned_nodes,
             summary: format!(
-                "PRE-FLIGHT BLOCKED: Node {} has multiple simultaneous degrading 800G transceivers; drain and replace before job start.",
-                bad_node
+                "PRE-FLIGHT BLOCKED: Node(s) {:?} have multiple simultaneous degrading 800G transceivers; drain and replace before job start.",
+                cordoned_nodes
             ),
+            cordoned_nodes,
         };
     }
 
@@ -280,5 +289,69 @@ mod tests {
         assert!(verdict.allow_job_start);
         assert!(verdict.auto_remediated);
         assert!(!verdict.recommended_nccl_env.is_empty());
+    }
+
+    #[test]
+    fn test_preflight_blocks_multi_rail_failures_on_single_node() {
+        let hb1 = WorkerTelemetryHeartbeat {
+            node_hostname: "gpu-node-001".into(),
+            timestamp_ns: 2_000_000_000,
+            tier1_anomalies: vec![Tier1OpticalAnomaly {
+                node_hostname: "gpu-node-001".into(),
+                hca_name: "mlx5_0".into(),
+                pcie_bdf: "0000:10:00.0".into(),
+                rail_id: 0,
+                transceiver_sn: "SN001".into(),
+                instantaneous_ber: 2.5e-4,
+                d1_log_ber_per_sec: 1.0,
+                d2_log_ber_per_sec2: 2.0,
+                uncorr_codewords_per_sec: 200.0,
+                pfc_pause_rate_us_per_sec: 10_000.0,
+                predicted_time_to_link_flap_sec: 30.0,
+            }],
+            nccl_events: vec![],
+            ecmp_observations: vec![],
+        };
+
+        let hb2 = WorkerTelemetryHeartbeat {
+            node_hostname: "gpu-node-002".into(),
+            timestamp_ns: 2_000_000_000,
+            tier1_anomalies: vec![
+                Tier1OpticalAnomaly {
+                    node_hostname: "gpu-node-002".into(),
+                    hca_name: "mlx5_1".into(),
+                    pcie_bdf: "0000:11:00.0".into(),
+                    rail_id: 1,
+                    transceiver_sn: "SN002A".into(),
+                    instantaneous_ber: 3.0e-4,
+                    d1_log_ber_per_sec: 1.5,
+                    d2_log_ber_per_sec2: 3.0,
+                    uncorr_codewords_per_sec: 300.0,
+                    pfc_pause_rate_us_per_sec: 20_000.0,
+                    predicted_time_to_link_flap_sec: 20.0,
+                },
+                Tier1OpticalAnomaly {
+                    node_hostname: "gpu-node-002".into(),
+                    hca_name: "mlx5_2".into(),
+                    pcie_bdf: "0000:12:00.0".into(),
+                    rail_id: 2,
+                    transceiver_sn: "SN002B".into(),
+                    instantaneous_ber: 4.0e-4,
+                    d1_log_ber_per_sec: 2.0,
+                    d2_log_ber_per_sec2: 4.0,
+                    uncorr_codewords_per_sec: 400.0,
+                    pfc_pause_rate_us_per_sec: 30_000.0,
+                    predicted_time_to_link_flap_sec: 10.0,
+                },
+            ],
+            nccl_events: vec![],
+            ecmp_observations: vec![],
+        };
+
+        let state = process_cluster_telemetry_batch("cluster-test", 1024, &[hb1, hb2], 12_000);
+        let verdict = evaluate_preflight_certification(&state);
+        assert!(!verdict.allow_job_start, "Should block job start when node-002 has 2 failing rails");
+        assert_eq!(verdict.cordoned_nodes, vec!["gpu-node-002"]);
+        assert!(verdict.summary.contains("PRE-FLIGHT BLOCKED"));
     }
 }

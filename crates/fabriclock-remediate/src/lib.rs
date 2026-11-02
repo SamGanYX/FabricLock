@@ -111,16 +111,24 @@ pub fn execute_nvswitch_pxn_failover(
     shm: Option<&ShmIpcRegion>,
 ) -> PxnCrossRailFailoverResult {
     let bad_rail = anomaly.rail_id;
-    let sibling_rail = (bad_rail + 1) % 8;
+    let quarantined_mask = shm
+        .map(|s| s.directive.quarantined_rail_mask.load(std::sync::atomic::Ordering::Acquire))
+        .unwrap_or(0);
+
+    // Pick the first sibling rail that is not currently quarantined
+    let sibling_rail = (1..8u8)
+        .map(|offset| (bad_rail + offset) % 8)
+        .find(|&candidate| (quarantined_mask & (1 << candidate)) == 0)
+        .unwrap_or_else(|| (bad_rail + 1) % 8);
     let sibling_hca = format!("mlx5_{}", sibling_rail);
 
     if let Some(region) = shm {
         region.set_rail_pxn_failover(bad_rail, sibling_rail);
     }
 
-    // Build list of active healthy HCAs for NCCL_IB_HCA
+    // Build list of active healthy HCAs for NCCL_IB_HCA excluding all quarantined rails
     let healthy_hcas: Vec<String> = (0..8u8)
-        .filter(|&r| r != bad_rail)
+        .filter(|&r| (quarantined_mask & (1 << r)) == 0 && r != bad_rail)
         .map(|r| format!("mlx5_{}:1", r))
         .collect();
 
