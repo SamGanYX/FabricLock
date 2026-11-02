@@ -196,6 +196,31 @@ pub unsafe extern "C" fn mock_ibv_modify_qp_success(
     0
 }
 
+/// Attempts to extract the rail index (0..7) from the underlying `ibv_context -> ibv_device -> name`
+/// pointer chain (e.g. "mlx5_3" -> rail 3), or falls back to port_num / default.
+pub unsafe fn infer_rail_from_ibv_qp(qp: *mut IbvQp, attr: *mut IbvQpAttr) -> u8 {
+    if !qp.is_null() && !(*qp).context.is_null() {
+        // struct ibv_context { struct ibv_device *device; ... }
+        let ctx = (*qp).context as *const *const c_void;
+        let dev_ptr = *ctx;
+        if !dev_ptr.is_null() {
+            // Inspect the first 256 bytes of struct ibv_device for the HCA name string e.g. "mlx5_3"
+            let bytes = std::slice::from_raw_parts(dev_ptr as *const u8, 256);
+            if let Some(pos) = bytes.windows(5).position(|w| w == b"mlx5_") {
+                let digit_byte = bytes.get(pos + 5).copied().unwrap_or(0);
+                if digit_byte.is_ascii_digit() {
+                    return digit_byte - b'0';
+                }
+            }
+        }
+    }
+    if !attr.is_null() {
+        (*attr).ah_attr.port_num.saturating_sub(1)
+    } else {
+        0
+    }
+}
+
 /// C-ABI Hook Function: Intercepts `ibv_modify_qp` during NCCL RTR -> RTS setup to record
 /// the Queue Pair pointer, `qp_num`, and initial `IbvAhAttr`, and applies any active ECMP sport offset.
 #[no_mangle]
@@ -240,12 +265,8 @@ pub unsafe extern "C" fn ibv_modify_qp(
     } else {
         Some(std::mem::transmute::<*mut c_void, IbvModifyQpFn>(next_ptr))
     };
-    let rail_guess = if !attr.is_null() {
-        (*attr).ah_attr.port_num.saturating_sub(1)
-    } else {
-        0
-    };
-    fabriclock_hook_ibv_modify_qp(qp, attr, attr_mask, rail_guess, real_fn)
+    let rail_id = infer_rail_from_ibv_qp(qp, attr);
+    fabriclock_hook_ibv_modify_qp(qp, attr, attr_mask, rail_id, real_fn)
 }
 
 /// Triggered by the FabricLock NCCL Profiler Plugin at the start of each collective step
@@ -329,5 +350,36 @@ mod tests {
         assert_eq!(tracked.base_udp_sport, 49164);
         assert_eq!(tracked.current_udp_sport, 49164 + 17);
         assert_eq!(tracked.rotation_count, 1);
+    }
+
+    #[test]
+    fn test_infer_rail_from_ibv_device_name() {
+        // Construct a mock ibv_device memory buffer containing "mlx5_5"
+        let mut mock_device = vec![0u8; 128];
+        mock_device[32..38].copy_from_slice(b"mlx5_5");
+        let dev_ptr = mock_device.as_ptr() as *const c_void;
+
+        // Construct mock ibv_context where first pointer points to mock_device
+        let mock_context = [dev_ptr];
+        let ctx_ptr = mock_context.as_ptr() as *mut c_void;
+
+        let mut qp = IbvQp {
+            context: ctx_ptr,
+            qp_context: std::ptr::null_mut(),
+            pd: std::ptr::null_mut(),
+            send_cq: std::ptr::null_mut(),
+            recv_cq: std::ptr::null_mut(),
+            srq: std::ptr::null_mut(),
+            handle: 1,
+            qp_num: 100,
+            state: 1,
+            qp_type: IBV_QPT_RC,
+            mutex: [0; 40],
+            cond: [0; 48],
+            events_completed: 0,
+        };
+
+        let rail = unsafe { infer_rail_from_ibv_qp(&mut qp as *mut IbvQp, std::ptr::null_mut()) };
+        assert_eq!(rail, 5, "Should infer rail 5 from mlx5_5 device string in context");
     }
 }
