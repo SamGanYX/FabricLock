@@ -112,6 +112,47 @@ fn monotonic_ns() -> u64 {
     Instant::now().duration_since(*base).as_nanos() as u64
 }
 
+/// Fast zero-allocation C-string classifier for NCCL collective operation names
+/// (`"AllReduce"`, `"ReduceScatter"`, `"AllGather"`, `"Broadcast"`, `"Reduce"`, `"SendRecv"`).
+#[inline]
+pub unsafe fn parse_nccl_func_name(func_ptr: *const c_char) -> NcclCollectiveKind {
+    if func_ptr.is_null() {
+        return NcclCollectiveKind::AllReduce;
+    }
+    let b0 = *func_ptr as u8;
+    let b1 = *func_ptr.add(1) as u8;
+    match (b0, b1) {
+        (b'A', b'l') | (b'a', b'l') => {
+            // Distinguish "AllReduce" vs "AllGather" at byte offset 3 ('R' vs 'G')
+            let b2 = *func_ptr.add(2) as u8;
+            if b2 != 0 {
+                let b3 = *func_ptr.add(3) as u8;
+                if b3 == b'G' || b3 == b'g' {
+                    return NcclCollectiveKind::AllGather;
+                }
+            }
+            NcclCollectiveKind::AllReduce
+        }
+        (b'R', b'e') | (b'r', b'e') => {
+            // Distinguish "ReduceScatter" vs "Reduce" at byte offset 6 ('S' vs '\0')
+            let mut len = 0usize;
+            while len < 7 && *func_ptr.add(len) != 0 {
+                len += 1;
+            }
+            if len >= 7 {
+                let b6 = *func_ptr.add(6) as u8;
+                if b6 == b'S' || b6 == b's' {
+                    return NcclCollectiveKind::ReduceScatter;
+                }
+            }
+            NcclCollectiveKind::Reduce
+        }
+        (b'B', _) | (b'b', _) => NcclCollectiveKind::Broadcast,
+        (b'S', _) | (b's', _) => NcclCollectiveKind::SendRecv,
+        _ => NcclCollectiveKind::AllReduce,
+    }
+}
+
 pub unsafe extern "C" fn fabriclock_profiler_init(
     context: *mut *mut c_void,
     e_activation_mask: *mut c_int,
@@ -175,7 +216,7 @@ pub unsafe extern "C" fn fabriclock_profiler_start_event(
         udp_sport: 49152 + ((descr.qp_num as u16) & 0x3F),
         rail_id: descr.rail_id,
         channel_id: descr.channel_id,
-        coll_kind: NcclCollectiveKind::AllReduce as u8,
+        coll_kind: parse_nccl_func_name(descr.func_or_channel) as u8,
         is_proxy_op: if (descr.event_type as c_int) == NCCL_PROFILE_PROXY_OP {
             1
         } else {
@@ -285,6 +326,19 @@ mod tests {
             assert_eq!(slot.ev.peer_rank, 8);
             assert_eq!(slot.ev.qp_num, 0x004219);
             assert_eq!(slot.ev.step_seq, 109);
+
+            assert_eq!(
+                parse_nccl_func_name(b"ReduceScatter\0".as_ptr() as *const c_char),
+                NcclCollectiveKind::ReduceScatter
+            );
+            assert_eq!(
+                parse_nccl_func_name(b"AllGather\0".as_ptr() as *const c_char),
+                NcclCollectiveKind::AllGather
+            );
+            assert_eq!(
+                parse_nccl_func_name(b"AllReduce\0".as_ptr() as *const c_char),
+                NcclCollectiveKind::AllReduce
+            );
 
             assert_eq!((ncclProfiler_v2.finalize)(ctx), NCCL_SUCCESS);
         }
