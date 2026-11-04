@@ -291,10 +291,60 @@ pub fn parse_transceiver_eeprom_page0(eeprom: &[u8]) -> Option<TransceiverModule
             vendor_rev,
             temperature_c: temp_c,
             vcc_voltage_v: vcc_v,
-            rx_power_dbm: [-1.4; 8],
-            tx_bias_ma: [6.9; 8],
+            rx_power_dbm: {
+                // SFF-8636 Lower Memory Bytes 34..42 store 4-lane Rx optical power in 0.1 uW
+                let mut rx_dbm = [-1.4f32; 8];
+                for lane in 0..4usize {
+                    let off = 34 + lane * 2;
+                    let raw_01uw = u16::from_be_bytes([eeprom[off], eeprom[off + 1]]);
+                    if raw_01uw > 0 {
+                        let mw = (raw_01uw as f32) * 0.0001;
+                        rx_dbm[lane] = 10.0 * mw.log10();
+                    }
+                }
+                rx_dbm
+            },
+            tx_bias_ma: {
+                // SFF-8636 Lower Memory Bytes 42..50 store 4-lane Tx laser bias current in 2 uA
+                let mut bias_ma = [6.9f32; 8];
+                for lane in 0..4usize {
+                    let off = 42 + lane * 2;
+                    let raw_2ua = u16::from_be_bytes([eeprom[off], eeprom[off + 1]]);
+                    if raw_2ua > 0 {
+                        bias_ma[lane] = (raw_2ua as f32) * 0.002;
+                    }
+                }
+                bias_ma
+            },
         })
     }
+}
+
+/// Decodes CMIS 5.0 Upper Memory Page 11h (128 bytes corresponding to address `128..=255`)
+/// to populate real 8-lane optical Rx power (dBm) and Tx laser bias current (mA) on `info`.
+///
+/// CMIS 5.0 Page 11h layout (0-indexed within the 128-byte upper page):
+///   - Offset `26..42` (Page 11h bytes `154..170`): 8x `u16` Tx bias current in 2 uA increments
+///   - Offset `42..58` (Page 11h bytes `170..186`): 8x `u16` Rx input optical power in 0.1 uW increments
+pub fn decode_cmis_page11h_lane_ddm(page11h: &[u8], info: &mut TransceiverModuleInfo) -> bool {
+    if page11h.len() < 58 {
+        return false;
+    }
+    for lane in 0..8usize {
+        let bias_off = 26 + lane * 2;
+        let raw_bias = u16::from_be_bytes([page11h[bias_off], page11h[bias_off + 1]]);
+        info.tx_bias_ma[lane] = (raw_bias as f32) * 0.002;
+
+        let rx_off = 42 + lane * 2;
+        let raw_rx_01uw = u16::from_be_bytes([page11h[rx_off], page11h[rx_off + 1]]);
+        if raw_rx_01uw > 0 {
+            let mw = (raw_rx_01uw as f32) * 0.0001;
+            info.rx_power_dbm[lane] = 10.0 * mw.log10();
+        } else {
+            info.rx_power_dbm[lane] = -40.0; // LOS floor
+        }
+    }
+    true
 }
 
 /// Decoded IEEE 802.1AB LLDP Neighbor Discovery frame identifying the exact physical
@@ -425,6 +475,23 @@ mod tests {
         assert_eq!(info.vendor_sn, "INNO99481A0042");
         assert!((info.temperature_c - 54.5).abs() < 0.01);
         assert!((info.vcc_voltage_v - 3.30).abs() < 0.01);
+
+        // Verify CMIS Page 11h 8-lane Rx optical power & Tx bias decoder:
+        // 1.0 mW (0.0 dBm) = 10,000 * 0.1 uW = 0x2710
+        // 8.0 mA = 4,000 * 2 uA = 0x0FA0
+        let mut page11h = vec![0u8; 128];
+        for lane in 0..8usize {
+            let bias_off = 26 + lane * 2;
+            page11h[bias_off..bias_off + 2].copy_from_slice(&4000u16.to_be_bytes());
+            let rx_off = 42 + lane * 2;
+            let raw_rx: u16 = if lane == 3 { 1000 } else { 10000 }; // Lane 3 degraded to -10.0 dBm (0.1 mW)
+            page11h[rx_off..rx_off + 2].copy_from_slice(&raw_rx.to_be_bytes());
+        }
+        let mut decoded_info = info;
+        assert!(decode_cmis_page11h_lane_ddm(&page11h, &mut decoded_info));
+        assert!((decoded_info.rx_power_dbm[0] - 0.0).abs() < 0.01);
+        assert!((decoded_info.rx_power_dbm[3] - (-10.0)).abs() < 0.01);
+        assert!((decoded_info.tx_bias_ma[0] - 8.0).abs() < 0.01);
     }
 
     #[test]
