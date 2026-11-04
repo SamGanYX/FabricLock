@@ -142,7 +142,8 @@ pub fn execute_nvswitch_pxn_failover(
         ),
     ];
 
-    let topo_xml = generate_hgx_pxn_failover_topo_xml(&anomaly.node_hostname, bad_rail, sibling_rail);
+    let combined_mask = quarantined_mask | (1u8 << (bad_rail & 7));
+    let topo_xml = generate_hgx_pxn_failover_topo_xml_with_mask(&anomaly.node_hostname, combined_mask, sibling_rail);
 
     PxnCrossRailFailoverResult {
         node_hostname: anomaly.node_hostname.clone(),
@@ -165,10 +166,21 @@ pub fn generate_hgx_pxn_failover_topo_xml(
     quarantined_rail: u8,
     sibling_rail: u8,
 ) -> String {
+    generate_hgx_pxn_failover_topo_xml_with_mask(hostname, 1u8 << (quarantined_rail & 7), sibling_rail)
+}
+
+/// Generates a production-compatible NVIDIA NCCL Topology XML (`<system version="1">`)
+/// pruning all NICs set in `quarantined_rail_mask` while preserving full intra-node NVSwitch
+/// connectivity across all 8 GPUs.
+pub fn generate_hgx_pxn_failover_topo_xml_with_mask(
+    hostname: &str,
+    quarantined_rail_mask: u8,
+    sibling_rail: u8,
+) -> String {
     let mut xml = String::with_capacity(2048);
     xml.push_str(&format!(
-        "<!-- FabricLock Autonomous PXN Failover Topology for {} (Quarantined: mlx5_{} -> Proxy: mlx5_{}) -->\n",
-        hostname, quarantined_rail, sibling_rail
+        "<!-- FabricLock Autonomous PXN Failover Topology for {} (Quarantined Mask: 0b{:08b} -> Proxy: mlx5_{}) -->\n",
+        hostname, quarantined_rail_mask, sibling_rail
     ));
     xml.push_str("<system version=\"1\">\n");
     xml.push_str("  <cpu numaid=\"0\" affinity=\"00000000,ffffffff\" arch=\"x86_64\" vendor=\"GenuineIntel\" familyid=\"6\" modelid=\"143\">\n");
@@ -191,7 +203,7 @@ pub fn generate_hgx_pxn_failover_topo_xml(
         xml.push_str("        </gpu>\n");
         xml.push_str("      </pci>\n");
 
-        if rail != quarantined_rail {
+        if (quarantined_rail_mask & (1 << rail)) == 0 {
             xml.push_str(&format!(
                 "      <pci busid=\"0000:{:02x}:00.0\" class=\"0x020000\" link_speed=\"32.0 GT/s PCIe\" link_width=\"16\">\n",
                 0x30 + rail

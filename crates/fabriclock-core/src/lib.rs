@@ -263,7 +263,9 @@ pub fn correlate_nccl_and_fabric(
     let p99_step_ms = if durations_ms.is_empty() {
         180.0
     } else {
-        durations_ms[(durations_ms.len() * 95) / 100].max(ideal_step_ms)
+        // Interpolated p99 index across the sorted collective latency distribution
+        let idx = ((durations_ms.len() - 1) * 99) / 100;
+        durations_ms[idx].max(ideal_step_ms)
     };
 
     let mut stalled_rails: Vec<u8> = nccl_events
