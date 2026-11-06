@@ -13,13 +13,14 @@
 use fabriclock_ipc::ShmIpcRegion;
 use fabriclock_remediate::{
     compute_rocev2_flow_label_for_sport, rocev2_udp_sport_from_flow_label, IbvAhAttr, IBV_QP_AV,
+    ROCEV2_UDP_SPORT_MIN,
 };
 use libc::{c_int, c_void};
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Mutex;
 
-pub const MAX_TRACKED_QPS: usize = 512;
+pub const MAX_TRACKED_QPS: usize = 4096;
 pub const IBV_QPT_RC: u32 = 2; // Reliable Connected Queue Pair used by NCCL RoCEv2/IB
 
 /// Minimal C-ABI representation of `struct ibv_qp` (`<infiniband/verbs.h>`).
@@ -61,6 +62,9 @@ pub struct IbvQpAttr {
 /// Function pointer signature for the underlying `libibverbs` `ibv_modify_qp` implementation.
 pub type IbvModifyQpFn =
     unsafe extern "C" fn(qp: *mut IbvQp, attr: *mut IbvQpAttr, attr_mask: c_int) -> c_int;
+
+/// Function pointer signature for the underlying `libibverbs` `ibv_destroy_qp` implementation.
+pub type IbvDestroyQpFn = unsafe extern "C" fn(qp: *mut IbvQp) -> c_int;
 
 /// Metadata for a single tracked Reliable Connected (RC) Queue Pair owned by NCCL.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -128,6 +132,18 @@ impl LiveQpRegistry {
         }
     }
 
+    /// Unregisters a Queue Pair when destroyed by NCCL/PyTorch via `ibv_destroy_qp`.
+    /// Prevents stale pointer dereferences during subsequent ECMP rotations.
+    pub fn unregister_qp(&mut self, qp_ptr: *mut IbvQp) -> bool {
+        let addr = qp_ptr as usize;
+        if let Some(idx) = self.entries.iter().position(|e| e.qp_ptr_addr == addr) {
+            self.entries.swap_remove(idx);
+            true
+        } else {
+            false
+        }
+    }
+
     /// Checks `ShmIpcRegion.directive` at collective step boundaries; if `policy_generation`
     /// has advanced, calls `modify_fn(qp, &mut attr, IBV_QP_AV)` on all QPs belonging to the
     /// affected rail to rotate their encapsulating UDP source port in <2ms.
@@ -149,7 +165,8 @@ impl LiveQpRegistry {
                 continue;
             }
 
-            let target_sport = entry.base_udp_sport.wrapping_add(delta as u16);
+            let base_offset = entry.base_udp_sport.saturating_sub(ROCEV2_UDP_SPORT_MIN) & 0x3FFF;
+            let target_sport = ROCEV2_UDP_SPORT_MIN + ((base_offset + delta) & 0x3FFF);
             if target_sport == entry.current_udp_sport {
                 continue;
             }
@@ -195,6 +212,11 @@ pub unsafe extern "C" fn mock_ibv_modify_qp_success(
     _attr: *mut IbvQpAttr,
     _attr_mask: c_int,
 ) -> c_int {
+    0
+}
+
+/// Default safe hardware callback stub when destroying a QP outside a physical `libibverbs.so` process.
+pub unsafe extern "C" fn mock_ibv_destroy_qp_success(_qp: *mut IbvQp) -> c_int {
     0
 }
 
@@ -269,6 +291,37 @@ pub unsafe extern "C" fn ibv_modify_qp(
     };
     let rail_id = infer_rail_from_ibv_qp(qp, attr);
     fabriclock_hook_ibv_modify_qp(qp, attr, attr_mask, rail_id, real_fn)
+}
+
+/// C-ABI Hook Function: Intercepts `ibv_destroy_qp` to unregister Queue Pairs and prevent
+/// use-after-free when NCCL teardowns or recreates communicator rings.
+#[no_mangle]
+pub unsafe extern "C" fn fabriclock_hook_ibv_destroy_qp(
+    qp: *mut IbvQp,
+    real_destroy_qp: Option<IbvDestroyQpFn>,
+) -> c_int {
+    if !qp.is_null() {
+        if let Ok(mut reg) = GLOBAL_QP_REGISTRY.lock() {
+            reg.unregister_qp(qp);
+            TRACKED_QP_COUNT.store(reg.entries.len(), Ordering::Release);
+        }
+    }
+    let target_fn = real_destroy_qp.unwrap_or(mock_ibv_destroy_qp_success);
+    target_fn(qp)
+}
+
+/// Exported Linux `LD_PRELOAD` symbol overriding `ibv_destroy_qp` in `libibverbs.so.1`.
+#[cfg(target_os = "linux")]
+#[no_mangle]
+pub unsafe extern "C" fn ibv_destroy_qp(qp: *mut IbvQp) -> c_int {
+    let sym_name = b"ibv_destroy_qp\0";
+    let next_ptr = libc::dlsym(libc::RTLD_NEXT, sym_name.as_ptr() as *const libc::c_char);
+    let real_fn: Option<IbvDestroyQpFn> = if next_ptr.is_null() {
+        None
+    } else {
+        Some(std::mem::transmute::<*mut c_void, IbvDestroyQpFn>(next_ptr))
+    };
+    fabriclock_hook_ibv_destroy_qp(qp, real_fn)
 }
 
 /// Triggered by the FabricLock NCCL Profiler Plugin at the start of each collective step
@@ -383,5 +436,54 @@ mod tests {
 
         let rail = unsafe { infer_rail_from_ibv_qp(&mut qp as *mut IbvQp, std::ptr::null_mut()) };
         assert_eq!(rail, 5, "Should infer rail 5 from mlx5_5 device string in context");
+    }
+
+    #[test]
+    fn test_ibv_destroy_qp_unregisters_qp() {
+        let mut fake_qp = IbvQp {
+            context: std::ptr::null_mut(),
+            qp_context: std::ptr::null_mut(),
+            pd: std::ptr::null_mut(),
+            send_cq: std::ptr::null_mut(),
+            recv_cq: std::ptr::null_mut(),
+            srq: std::ptr::null_mut(),
+            handle: 42,
+            qp_num: 0x00BEEF,
+            state: 3,
+            qp_type: IBV_QPT_RC,
+            mutex: [0; 40],
+            cond: [0; 48],
+            events_completed: 0,
+        };
+
+        let mut attr = IbvQpAttr::default();
+        attr.dest_qp_num = 0x00CAFE;
+        attr.ah_attr.port_num = 1;
+        attr.ah_attr.grh.flow_label = compute_rocev2_flow_label_for_sport(49200);
+
+        unsafe {
+            fabriclock_hook_ibv_modify_qp(
+                &mut fake_qp as *mut IbvQp,
+                &mut attr as *mut IbvQpAttr,
+                IBV_QP_AV,
+                2,
+                None,
+            );
+        }
+
+        {
+            let reg = GLOBAL_QP_REGISTRY.lock().unwrap();
+            assert!(reg.entries.iter().any(|e| e.qp_num == 0x00BEEF));
+        }
+
+        unsafe {
+            let rc = fabriclock_hook_ibv_destroy_qp(&mut fake_qp as *mut IbvQp, None);
+            assert_eq!(rc, 0);
+        }
+
+        {
+            let reg = GLOBAL_QP_REGISTRY.lock().unwrap();
+            assert!(!reg.entries.iter().any(|e| e.qp_num == 0x00BEEF));
+        }
     }
 }

@@ -96,7 +96,7 @@ pub fn rotate_qp_ecmp_hash(
     let new_flow_label = compute_rocev2_flow_label_for_sport(new_sport);
 
     if let Some(region) = shm {
-        let delta = new_sport.wrapping_sub(old_sport) as u8;
+        let delta = new_sport.wrapping_sub(old_sport) & 0x3FFF;
         region.set_rail_ecmp_sport_delta(fault.rail_id, delta);
     }
 

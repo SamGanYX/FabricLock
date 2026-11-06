@@ -6,7 +6,7 @@
 //! false sharing between the PyTorch/NCCL proxy thread and the FabricLock telemetry thread.
 
 use serde::{Deserialize, Serialize};
-use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU16, AtomicU64, AtomicU8, Ordering};
 
 pub const SHM_MAGIC: u64 = 0x4641_4252_4C4F_434B; // "FABRLOCK"
 pub const RING_CAPACITY: usize = 4096; // Power of 2 for bitwise modulo masking
@@ -109,7 +109,7 @@ pub struct RailBypassDirective {
     /// Monotonic generation counter incremented whenever a bypass policy changes
     pub policy_generation: AtomicU64,
     /// Target UDP source port offset for ECMP Spine failover (`ibv_modify_qp`)
-    pub ecmp_sport_delta: [AtomicU8; 8],
+    pub ecmp_sport_delta: [AtomicU16; 8],
 }
 
 /// Complete Shared Memory Region mapped at `/dev/shm/fabriclock_nccl_ipc.shm`.
@@ -191,7 +191,7 @@ impl ShmIpcRegion {
     }
 
     /// Atomically sets an ECMP UDP source-port rotation offset for a rail to bypass a degraded Spine.
-    pub fn set_rail_ecmp_sport_delta(&self, rail: u8, sport_delta: u8) {
+    pub fn set_rail_ecmp_sport_delta(&self, rail: u8, sport_delta: u16) {
         if (rail as usize) < 8 {
             self.directive.ecmp_sport_delta[rail as usize].store(sport_delta, Ordering::Release);
             self.directive.policy_generation.fetch_add(1, Ordering::AcqRel);
