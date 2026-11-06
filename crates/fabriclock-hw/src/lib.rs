@@ -443,6 +443,103 @@ pub fn build_ethtool_netlink_fec_request(ifname: &str, nlmsg_seq: u32, ethtool_f
     pkt
 }
 
+pub const ETHTOOL_MSG_FEC_GET_REPLY: u8 = 30;
+pub const ETHTOOL_A_FEC_STATS: u16 = 5;
+pub const ETHTOOL_A_FEC_STAT_CORR: u16 = 2;
+pub const ETHTOOL_A_FEC_STAT_UNCORR: u16 = 3;
+pub const ETHTOOL_A_FEC_STAT_CORR_BITS: u16 = 4;
+pub const NLA_TYPE_MASK: u16 = 0x3FFF;
+
+/// Kernel physical FEC statistics retrieved via Netlink `ETHTOOL_MSG_FEC_GET_REPLY`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EthtoolFecStats {
+    pub corr_blocks: u64,
+    pub uncorr_blocks: u64,
+    pub corr_bits: u64,
+}
+
+/// Parses a binary Linux Generic Netlink reply packet for `ETHTOOL_MSG_FEC_GET_REPLY` (cmd = 30).
+/// Traverses nested `ETHTOOL_A_FEC_STATS` attributes to extract 64-bit corrected and uncorrected
+/// physical layer block counters.
+pub fn parse_ethtool_netlink_fec_reply(reply: &[u8]) -> Option<EthtoolFecStats> {
+    if reply.len() < 20 {
+        return None;
+    }
+    let nlmsg_len = u32::from_ne_bytes(reply[0..4].try_into().ok()?) as usize;
+    if reply.len() < nlmsg_len || nlmsg_len < 20 {
+        return None;
+    }
+
+    let genl_cmd = reply[16];
+    if genl_cmd != ETHTOOL_MSG_FEC_GET_REPLY {
+        return None;
+    }
+
+    let mut stats = EthtoolFecStats::default();
+    let mut offset = 20;
+
+    let read_u64_or_u32 = |data: &[u8]| -> u64 {
+        if data.len() >= 8 {
+            u64::from_ne_bytes(data[0..8].try_into().unwrap_or([0; 8]))
+        } else if data.len() >= 4 {
+            u32::from_ne_bytes(data[0..4].try_into().unwrap_or([0; 4])) as u64
+        } else {
+            0
+        }
+    };
+
+    while offset + 4 <= nlmsg_len {
+        let nla_len = u16::from_ne_bytes(reply[offset..offset + 2].try_into().ok()?) as usize;
+        let nla_type_raw = u16::from_ne_bytes(reply[offset + 2..offset + 4].try_into().ok()?);
+        let nla_type = nla_type_raw & NLA_TYPE_MASK;
+
+        if nla_len < 4 || offset + nla_len > nlmsg_len {
+            break;
+        }
+
+        let payload = &reply[offset + 4..offset + nla_len];
+
+        if nla_type == ETHTOOL_A_FEC_STATS {
+            let mut sub_offset = 0;
+            while sub_offset + 4 <= payload.len() {
+                let sub_len =
+                    u16::from_ne_bytes(payload[sub_offset..sub_offset + 2].try_into().ok()?)
+                        as usize;
+                let sub_type_raw =
+                    u16::from_ne_bytes(payload[sub_offset + 2..sub_offset + 4].try_into().ok()?);
+                let sub_type = sub_type_raw & NLA_TYPE_MASK;
+
+                if sub_len < 4 || sub_offset + sub_len > payload.len() {
+                    break;
+                }
+
+                let sub_payload = &payload[sub_offset + 4..sub_offset + sub_len];
+                match sub_type {
+                    ETHTOOL_A_FEC_STAT_CORR => {
+                        stats.corr_blocks = read_u64_or_u32(sub_payload);
+                    }
+                    ETHTOOL_A_FEC_STAT_UNCORR => {
+                        stats.uncorr_blocks = read_u64_or_u32(sub_payload);
+                    }
+                    ETHTOOL_A_FEC_STAT_CORR_BITS => {
+                        stats.corr_bits = read_u64_or_u32(sub_payload);
+                    }
+                    _ => {}
+                }
+
+                let aligned_sub = (sub_len + 3) & !3;
+                sub_offset += aligned_sub;
+            }
+            return Some(stats);
+        }
+
+        let aligned_len = (nla_len + 3) & !3;
+        offset += aligned_len;
+    }
+
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -575,5 +672,61 @@ mod tests {
         let nl_pkt = build_ethtool_netlink_fec_request("eth0", 42, 0x1A);
         assert_eq!(nl_pkt[16], 29); // ETHTOOL_MSG_FEC_GET
         assert!(nl_pkt.len() >= 32);
+    }
+
+    #[test]
+    fn test_parse_ethtool_netlink_fec_reply() {
+        // Construct synthetic ETHTOOL_MSG_FEC_GET_REPLY (cmd = 30)
+        // Sub-NLA 1: CORR (type 2, len 12, u64 1234567)
+        let mut corr_nla = vec![0u8; 12];
+        corr_nla[0..2].copy_from_slice(&12u16.to_ne_bytes());
+        corr_nla[2..4].copy_from_slice(&2u16.to_ne_bytes());
+        corr_nla[4..12].copy_from_slice(&1234567u64.to_ne_bytes());
+
+        // Sub-NLA 2: UNCORR (type 3, len 12, u64 89)
+        let mut uncorr_nla = vec![0u8; 12];
+        uncorr_nla[0..2].copy_from_slice(&12u16.to_ne_bytes());
+        uncorr_nla[2..4].copy_from_slice(&3u16.to_ne_bytes());
+        uncorr_nla[4..12].copy_from_slice(&89u64.to_ne_bytes());
+
+        // Sub-NLA 3: CORR_BITS (type 4, len 12, u64 9876543)
+        let mut bits_nla = vec![0u8; 12];
+        bits_nla[0..2].copy_from_slice(&12u16.to_ne_bytes());
+        bits_nla[2..4].copy_from_slice(&4u16.to_ne_bytes());
+        bits_nla[4..12].copy_from_slice(&9876543u64.to_ne_bytes());
+
+        let mut sub_payload = Vec::new();
+        sub_payload.extend_from_slice(&corr_nla);
+        sub_payload.extend_from_slice(&uncorr_nla);
+        sub_payload.extend_from_slice(&bits_nla);
+
+        // Nested ETHTOOL_A_FEC_STATS NLA (type 5 | 0x8000)
+        let nla_stats_len = (4 + sub_payload.len()) as u16;
+        let mut stats_nla = vec![0u8; 4];
+        stats_nla[0..2].copy_from_slice(&nla_stats_len.to_ne_bytes());
+        stats_nla[2..4].copy_from_slice(&(5u16 | 0x8000).to_ne_bytes());
+        stats_nla.extend_from_slice(&sub_payload);
+
+        let total_len = 16 + 4 + stats_nla.len();
+        let mut reply = vec![0u8; total_len];
+        // nlmsghdr
+        reply[0..4].copy_from_slice(&(total_len as u32).to_ne_bytes());
+        reply[4..6].copy_from_slice(&0x1Au16.to_ne_bytes());
+        reply[6..8].copy_from_slice(&0u16.to_ne_bytes());
+        reply[8..12].copy_from_slice(&100u32.to_ne_bytes());
+        reply[12..16].copy_from_slice(&1234u32.to_ne_bytes());
+
+        // genlmsghdr: cmd = 30 (ETHTOOL_MSG_FEC_GET_REPLY)
+        reply[16] = 30;
+        reply[17] = 1;
+        reply[18..20].copy_from_slice(&0u16.to_ne_bytes());
+
+        // Append stats NLA
+        reply[20..20 + stats_nla.len()].copy_from_slice(&stats_nla);
+
+        let parsed = parse_ethtool_netlink_fec_reply(&reply).expect("valid FEC stats reply");
+        assert_eq!(parsed.corr_blocks, 1234567);
+        assert_eq!(parsed.uncorr_blocks, 89);
+        assert_eq!(parsed.corr_bits, 9876543);
     }
 }
