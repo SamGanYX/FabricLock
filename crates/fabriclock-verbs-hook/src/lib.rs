@@ -11,7 +11,9 @@
 //!     the instant `ShmIpcRegion.directive.policy_generation` increments!
 
 use fabriclock_ipc::ShmIpcRegion;
-use fabriclock_remediate::{compute_rocev2_flow_label_for_sport, IbvAhAttr, IBV_QP_AV};
+use fabriclock_remediate::{
+    compute_rocev2_flow_label_for_sport, rocev2_udp_sport_from_flow_label, IbvAhAttr, IBV_QP_AV,
+};
 use libc::{c_int, c_void};
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -102,7 +104,7 @@ impl LiveQpRegistry {
         ah_attr: IbvAhAttr,
     ) {
         let addr = qp_ptr as usize;
-        let sport = 49152 + ((ah_attr.grh.flow_label as u16) & 0x3FFF);
+        let sport = rocev2_udp_sport_from_flow_label(ah_attr.grh.flow_label);
         if let Some(existing) = self.entries.iter_mut().find(|e| e.qp_ptr_addr == addr && e.qp_num == qp_num) {
             existing.dest_qp_num = dest_qp_num;
             existing.cached_ah_attr = ah_attr;

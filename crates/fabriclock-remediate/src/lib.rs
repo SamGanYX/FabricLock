@@ -39,13 +39,38 @@ pub struct IbvAhAttr {
     pub port_num: u8,
 }
 
-/// Computes the new 20-bit IPv6/RoCEv2 `flow_label` that forces a Mellanox ConnectX-7 / Broadcom Thor2
-/// NIC ASIC to hash to `target_udp_sport` (`0xC000..0xFFFF`).
+/// Lowest UDP source port the kernel will emit for RoCEv2 (`IB_ROCE_UDP_ENCAP_VALID_PORT_MIN`).
+pub const ROCEV2_UDP_SPORT_MIN: u16 = 0xC000;
+
+/// Mirrors the Linux kernel's `rdma_flow_label_to_udp_sport()` (`include/rdma/ib_verbs.h`):
+/// the upper 6 bits of the 20-bit flow label are folded (XOR) into the lower 14 bits, and the
+/// result is placed in the `0xC000..=0xFFFF` range.
+///
+/// Note: drivers only use this mapping when a non-zero flow label is supplied. With a zero flow
+/// label, the kernel derives one from the local/remote QPNs instead (`rdma_calc_flow_label`).
+#[inline]
+pub fn rocev2_udp_sport_from_flow_label(flow_label: u32) -> u16 {
+    let fl_low = flow_label & 0x03FFF;
+    let fl_high = flow_label & 0xFC000;
+    ((fl_low ^ (fl_high >> 14)) as u16) | ROCEV2_UDP_SPORT_MIN
+}
+
+/// Returns a 20-bit flow label that the kernel maps to `target_udp_sport` via
+/// [`rocev2_udp_sport_from_flow_label`]. Ports below `0xC000` are not reachable and are folded
+/// into the valid range by keeping only the low 14 bits.
+///
+/// The upper 6 bits are left at zero so that no XOR folding occurs. Flow label 0 is reserved
+/// ("unset") in RoCEv2, so a target of exactly `0xC000` is encoded as `0x4000` instead
+/// (`0x4000 >> 14 == 1` is folded back in and cancelled by setting low bit 1).
 #[inline]
 pub fn compute_rocev2_flow_label_for_sport(target_udp_sport: u16) -> u32 {
-    // RoCEv2 UDP source port is derived from the lower 14 bits of the 20-bit GRH flow_label
-    // ORed with 0xC000 (49152).
-    ((target_udp_sport & 0x3FFF) as u32) | 0x000C_0000
+    let low14 = (target_udp_sport & 0x3FFF) as u32;
+    if low14 == 0 {
+        // fl_high = 0x4000 -> folds in as 1; low bits = 1 -> 1 ^ 1 == 0 -> sport 0xC000.
+        0x4000 | 0x1
+    } else {
+        low14
+    }
 }
 
 /// Dynamically attempts to load `libibverbs.so.1` on Linux to execute a live `ibv_modify_qp`
@@ -235,7 +260,7 @@ mod tests {
     #[test]
     fn test_rocev2_flow_label_and_pxn_xml_generation() {
         let fl = compute_rocev2_flow_label_for_sport(49165);
-        assert_eq!(fl & 0x3FFF, 49165 & 0x3FFF);
+        assert_eq!(rocev2_udp_sport_from_flow_label(fl), 49165);
 
         let anomaly = Tier1OpticalAnomaly {
             node_hostname: "gpu-node-042".into(),
@@ -258,5 +283,24 @@ mod tests {
             .generated_nccl_topo_xml
             .contains("QUARANTINED BY FABRICLOCK: mlx5_0"));
         assert!(res.generated_nccl_topo_xml.contains("<net name=\"mlx5_1\""));
+    }
+
+    #[test]
+    fn test_flow_label_round_trips_through_kernel_sport_mapping() {
+        // Every RoCEv2-reachable source port must survive the inverse -> forward round trip,
+        // and the generated label must be a valid non-zero 20-bit value.
+        for sport in ROCEV2_UDP_SPORT_MIN..=u16::MAX {
+            let fl = compute_rocev2_flow_label_for_sport(sport);
+            assert!(fl != 0 && fl <= 0xFFFFF, "invalid flow label {fl:#x} for sport {sport}");
+            assert_eq!(rocev2_udp_sport_from_flow_label(fl), sport, "sport {sport}");
+        }
+    }
+
+    #[test]
+    fn test_kernel_mapping_folds_high_flow_label_bits() {
+        // Regression: the previous encoder set bits 0xC0000, which the kernel folds back in
+        // as `^ 0x30`, producing the wrong source port.
+        let legacy_label = (49165u32 & 0x3FFF) | 0x000C_0000;
+        assert_eq!(rocev2_udp_sport_from_flow_label(legacy_label), 49165 ^ 0x30);
     }
 }
