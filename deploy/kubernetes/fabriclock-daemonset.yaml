@@ -29,11 +29,23 @@ spec:
       containers:
         - name: fabriclock-agent
           image: ghcr.io/fabriclock/fabriclock:v0.2.0
-          args: ["audit"]
+          args: ["serve", "--port", "9402"]
           ports:
             - name: metrics
               containerPort: 9402
               protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 9402
+            initialDelaySeconds: 2
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 9402
+            initialDelaySeconds: 2
+            periodSeconds: 5
           resources:
             requests:
               cpu: "250m"

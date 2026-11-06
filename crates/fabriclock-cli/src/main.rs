@@ -14,7 +14,7 @@
 use fabriclock_core::{correlate_nccl_and_fabric, OpticalSignalTracker, Tier1OpticalAnomaly};
 use fabriclock_daemon::{
     evaluate_preflight_certification, format_prometheus_openmetrics,
-    process_cluster_telemetry_batch, WorkerTelemetryHeartbeat,
+    process_cluster_telemetry_batch, serve_single_http_request, WorkerTelemetryHeartbeat,
 };
 use fabriclock_hw::{
     discover_linux_hcas, parse_transceiver_eeprom_page0, poll_linux_hca_port, NicHardwareSnapshot,
@@ -64,9 +64,24 @@ fn main() {
             );
             println!("{}", xml);
         }
+        "serve" => {
+            let port: u16 = args
+                .iter()
+                .position(|a| a == "--port" || a == "-p")
+                .and_then(|idx| args.get(idx + 1))
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(9402);
+            let cluster = args
+                .iter()
+                .position(|a| a == "--cluster")
+                .and_then(|idx| args.get(idx + 1))
+                .map(|s| s.as_str())
+                .unwrap_or("us-east-h100-prod-01");
+            run_daemon_http_server(port, cluster);
+        }
         _ => {
             println!(
-                "Usage: fabriclock [audit [--sysfs-root <dir>] | init-mock-sysfs <dir> | bench-tomography | metrics | preflight | generate-pxn-topo <host> <rail>]"
+                "Usage: fabriclock [serve [--port <p>] [--cluster <name>] | audit [--sysfs-root <dir>] | init-mock-sysfs <dir> | bench-tomography | metrics | preflight | generate-pxn-topo <host> <rail>]"
             );
         }
     }
@@ -436,6 +451,34 @@ fn run_slurm_k8s_preflight_check() {
     let state = build_sample_cluster_state();
     let verdict = evaluate_preflight_certification(&state);
     println!("{}", serde_json::to_string_pretty(&verdict).unwrap());
+}
+
+fn run_daemon_http_server(port: u16, cluster: &str) {
+    let addr = format!("0.0.0.0:{}", port);
+    let listener = match std::net::TcpListener::bind(&addr) {
+        Ok(l) => {
+            println!(
+                "[FABRICLOCK-DAEMON] HTTP server listening on http://{} (metrics: /metrics, health: /healthz)",
+                addr
+            );
+            l
+        }
+        Err(e) => {
+            eprintln!(
+                "[FABRICLOCK-DAEMON] Failed to bind to {}: {}. Retrying on 127.0.0.1:{}",
+                addr, e, port
+            );
+            std::net::TcpListener::bind(format!("127.0.0.1:{}", port))
+                .expect("Failed to bind fallback listener")
+        }
+    };
+
+    let mut state = build_sample_cluster_state();
+    state.cluster_name = cluster.to_string();
+
+    while let Ok(()) = serve_single_http_request(&listener, &state) {
+        // Continuous serving loop for scraping agents and orchestrators
+    }
 }
 
 fn generate_mock_sysfs_tree(root: &Path) {

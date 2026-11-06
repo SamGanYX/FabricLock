@@ -207,28 +207,58 @@ pub fn evaluate_preflight_certification(state: &ClusterControlPlaneState) -> Pre
     }
 }
 
-/// Serves a single HTTP request on `/metrics` (Prometheus) or `/api/v1/cluster/status` (JSON)
-/// so the daemon can be scraped or queried by dashboards and CLI tools.
+/// Serves a single HTTP request on `/metrics` (Prometheus), `/healthz` (liveness/readiness),
+/// `/api/v1/cluster/status` (JSON), or handles CORS OPTIONS preflights.
 pub fn serve_single_http_request(listener: &TcpListener, state: &ClusterControlPlaneState) -> std::io::Result<()> {
     let (mut stream, _) = listener.accept()?;
     let mut req_buf = [0u8; 1024];
     let n = stream.read(&mut req_buf)?;
+    if n == 0 {
+        return Ok(());
+    }
     let req_line = String::from_utf8_lossy(&req_buf[..n]);
 
-    let (content_type, body) = if req_line.contains("GET /api/v1/cluster/status") {
+    if req_line.starts_with("OPTIONS") {
+        let response = "HTTP/1.1 204 No Content\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type\r\nConnection: close\r\n\r\n";
+        stream.write_all(response.as_bytes())?;
+        return stream.flush();
+    }
+
+    let (status_code, content_type, body) = if req_line.contains("GET /api/v1/cluster/status") {
         (
+            "200 OK",
+            "application/json",
+            serde_json::to_string_pretty(state).unwrap_or_else(|_| "{}".into()),
+        )
+    } else if req_line.contains("GET /healthz") || req_line.contains("GET /livez") {
+        (
+            "200 OK",
+            "application/json",
+            "{\"status\":\"healthy\",\"daemon\":\"fabriclock\"}\n".to_string(),
+        )
+    } else if req_line.contains("GET /metrics") {
+        (
+            "200 OK",
+            "text/plain; version=0.0.4; charset=utf-8",
+            format_prometheus_openmetrics(state),
+        )
+    } else if req_line.contains("GET /") {
+        (
+            "200 OK",
             "application/json",
             serde_json::to_string_pretty(state).unwrap_or_else(|_| "{}".into()),
         )
     } else {
         (
-            "text/plain; version=0.0.4; charset=utf-8",
-            format_prometheus_openmetrics(state),
+            "404 Not Found",
+            "text/plain",
+            "Not Found\n".to_string(),
         )
     };
 
     let response = format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n{}",
+        "HTTP/1.1 {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n{}",
+        status_code,
         content_type,
         body.len(),
         body
@@ -241,6 +271,7 @@ pub fn serve_single_http_request(listener: &TcpListener, state: &ClusterControlP
 mod tests {
     use super::*;
     use fabriclock_ipc::NcclCollectiveKind;
+    use std::net::TcpStream;
 
     #[test]
     fn test_cluster_batch_prometheus_and_preflight() {
@@ -353,5 +384,42 @@ mod tests {
         assert!(!verdict.allow_job_start, "Should block job start when node-002 has 2 failing rails");
         assert_eq!(verdict.cordoned_nodes, vec!["gpu-node-002"]);
         assert!(verdict.summary.contains("PRE-FLIGHT BLOCKED"));
+    }
+
+    #[test]
+    fn test_serve_single_http_request_endpoints() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral listener");
+        let local_addr = listener.local_addr().unwrap();
+        let state = process_cluster_telemetry_batch("test-cluster", 128, &[], 0);
+
+        // Test /healthz
+        let handle = std::thread::spawn(move || {
+            let mut stream = TcpStream::connect(local_addr).unwrap();
+            stream
+                .write_all(b"GET /healthz HTTP/1.1\r\nHost: localhost\r\n\r\n")
+                .unwrap();
+            let mut resp = Vec::new();
+            stream.read_to_end(&mut resp).unwrap();
+            String::from_utf8(resp).unwrap()
+        });
+        serve_single_http_request(&listener, &state).unwrap();
+        let resp = handle.join().unwrap();
+        assert!(resp.starts_with("HTTP/1.1 200 OK"));
+        assert!(resp.contains("\"status\":\"healthy\""));
+
+        // Test OPTIONS (CORS preflight)
+        let handle_opts = std::thread::spawn(move || {
+            let mut stream = TcpStream::connect(local_addr).unwrap();
+            stream
+                .write_all(b"OPTIONS /api/v1/cluster/status HTTP/1.1\r\nHost: localhost\r\n\r\n")
+                .unwrap();
+            let mut resp = Vec::new();
+            stream.read_to_end(&mut resp).unwrap();
+            String::from_utf8(resp).unwrap()
+        });
+        serve_single_http_request(&listener, &state).unwrap();
+        let resp_opts = handle_opts.join().unwrap();
+        assert!(resp_opts.starts_with("HTTP/1.1 204 No Content"));
+        assert!(resp_opts.contains("Access-Control-Allow-Origin: *"));
     }
 }
